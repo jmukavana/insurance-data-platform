@@ -1,0 +1,54 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+**/.venv
+.venv/
+venv/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+.dbt/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Airflow
+orchestration/airflow/logs/
+airflow.cfg
+airflow.db
+unittests.cfg
+
+# Docker / data volumes
+data/
+*.log
+
+# JetBrains IDE
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
