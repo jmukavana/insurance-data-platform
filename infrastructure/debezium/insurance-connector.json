@@ -1,0 +1,39 @@
+{
+  "name": "insurance-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "insurance",
+    "database.password": "insurance",
+    "database.dbname": "insurance",
+
+    "topic.prefix": "insurance",
+    "schema.include.list": "insurance",
+
+    "plugin.name": "pgoutput",
+    "publication.name": "insurance_cdc",
+    "publication.autocreate.mode": "disabled",
+    "slot.name": "insurance_cdc_slot",
+
+    "snapshot.mode": "initial",
+
+    "decimal.handling.mode": "string",
+    "time.precision.mode": "connect",
+    "tombstones.on.delete": "false",
+
+    "heartbeat.interval.ms": "10000",
+
+    "topic.creation.enable": "true",
+    "topic.creation.default.replication.factor": "1",
+    "topic.creation.default.partitions": "3",
+    "topic.creation.default.cleanup.policy": "delete",
+    "topic.creation.default.retention.ms": "604800000",
+
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
+  }
+}

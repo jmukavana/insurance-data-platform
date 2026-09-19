@@ -1,0 +1,224 @@
+name: insurance-platform
+
+# Profiles keep RAM usage sane. Bring up only what a step needs:
+#   docker compose --profile core up -d
+#   docker compose --profile core --profile stream up -d
+#
+# Later steps add: stream (Debezium, Flink), analytics (Trino, ClickHouse),
+# ops (Airflow, Superset, Grafana).
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: [core]
+    container_name: insurance-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-insurance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insurance}
+      POSTGRES_DB: ${POSTGRES_DB:-insurance}
+    # Logical decoding must be enabled at server start; it cannot be set at runtime.
+    # Debezium claims one replication slot and one WAL sender.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-insurance} -d ${POSTGRES_DB:-insurance}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:4.0.0
+    profiles: [core]
+    container_name: insurance-kafka
+    environment:
+      # --- KRaft: this node is both broker and controller (single-node dev setup) ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+
+      # --- Listeners ---
+      # INTERNAL: reachable as "kafka" from other containers.
+      # EXTERNAL: reachable as "localhost:29092" from your laptop.
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # --- Single-node overrides: defaults assume a 3-broker cluster ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  minio:
+    image: quay.io/minio/minio:latest
+    profiles: [ core ]
+    container_name: insurance-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # One-shot: creates the lakehouse bucket, then exits.
+  minio-init:
+    image: quay.io/minio/mc:latest
+    profiles: [ core ]
+    container_name: insurance-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} &&
+      mc mb --ignore-existing local/lakehouse &&
+      mc mb --ignore-existing local/warehouse &&
+      echo 'buckets ready'
+      "
+
+  # Schema registry. Apicurio is Apache 2.0; the Confluent registry commonly
+  # used in tutorials is under the Confluent Community License and is not OSI
+  # open source. Apicurio exposes a Confluent-compatible API, so serdes are
+  # unchanged.
+  apicurio:
+    image: apicurio/apicurio-registry-mem:2.6.11.Final
+    profiles: [stream]
+    container_name: insurance-apicurio
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/apis/registry/v2/search/artifacts >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  connect:
+    image: quay.io/debezium/connect:3.0.0.Final
+    profiles: [stream]
+    container_name: insurance-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: insurance-connect
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Makes the Apicurio Avro converters available for the switch in Step 3b.
+      ENABLE_APICURIO_CONVERTERS: "true"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.2.0
+    profiles: [stream]
+    container_name: insurance-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8090:8080"
+
+  flink-jobmanager:
+    build:
+      context: ./infrastructure/flink
+    image: insurance-flink:1.20.1
+    profiles: [stream]
+    container_name: insurance-flink-jobmanager
+    command: jobmanager
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        # Checkpointing is what makes exactly-once possible. Without it a
+        # restarted job silently reprocesses or loses windows.
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        state.backend.type: rocksdb
+        state.checkpoints.dir: file:///flink-checkpoints
+    ports:
+      - "8081:8081"
+    volumes:
+      - flink-checkpoints:/flink-checkpoints
+      - ./streaming/sql:/opt/sql:ro,z
+
+  flink-taskmanager:
+    build:
+      context: ./infrastructure/flink
+    image: insurance-flink:1.20.1
+    profiles: [stream]
+    container_name: insurance-flink-taskmanager
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2048m
+        state.backend.type: rocksdb
+        state.checkpoints.dir: file:///flink-checkpoints
+    volumes:
+      - flink-checkpoints:/flink-checkpoints
+
+volumes:
+  postgres-data:
+  kafka-data:
+  minio-data:
+  flink-checkpoints:
