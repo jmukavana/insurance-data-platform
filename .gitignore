@@ -42,6 +42,8 @@ airflow.cfg
 airflow.db
 unittests.cfg
 
+.idea
+
 # Docker / data volumes
 data/
 *.log

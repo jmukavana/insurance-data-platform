@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import numpy as np
 
-from .config import FraudParameters
+from .config import FraudParameters, PRODUCT_CLASSES
 from .domain import Claim, FraudLabel, Policy
 
 STAGED_ACCIDENT = "STAGED_ACCIDENT_RING"
@@ -89,12 +89,23 @@ def _apply_staged_accident_rings(
         ring_sequence += 1
         ring_id = f"RING-{ring_sequence:04d}"
         shared_provider_index = int(rng.integers(0, 200))
-        ring_amount_centre = float(rng.uniform(180_000, 900_000))
+        # ring_amount_centre = float(rng.uniform(180_000, 900_000))
 
         chosen = rng.choice(
             sorted(available_indices), size=ring_size, replace=False,
         )
         for claim_index in chosen:
+            first_policy = next(
+                (policy_by_number[claims[int(i)].policy_number]
+                 for i in chosen
+                 if claims[int(i)].policy_number in policy_by_number),
+                None,
+            )
+            if first_policy is None:
+                continue
+            ring_amount_centre = _severity_centre_for(first_policy.product_class) * float(
+                rng.uniform(1.2, 2.5)
+            )
             claim_index = int(claim_index)
             original = claims[claim_index]
             policy = policy_by_number.get(original.policy_number)
@@ -126,6 +137,15 @@ def _apply_staged_accident_rings(
             available_indices.discard(claim_index)
             assigned += 1
 
+
+def _severity_centre_for(product_class: str) -> float:
+    """Mean severity for a class: exp(mu + sigma^2 / 2) for a log-normal."""
+    for product in PRODUCT_CLASSES:
+        if product.name == product_class:
+            return float(np.exp(
+                product.severity_log_mean + product.severity_log_sigma ** 2 / 2
+            ))
+    raise ValueError(f"Unknown product class: {product_class}")
 
 def _apply_inflated_claims(
     rng: np.random.Generator,

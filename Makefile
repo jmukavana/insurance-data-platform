@@ -3,9 +3,24 @@ CONNECT_URL := http://localhost:8083
 CONNECTOR_NAME := insurance-cdc
 GENERATOR := generator/.venv/bin/insurance-generator
 PSQL := docker exec -i insurance-postgres psql -U insurance -d insurance
+FLINK_SQL := streaming/sql
 
 .PHONY: core stream down clean backfill live connector-register connector-status \
-        connector-delete slot-status topics consume-claims
+        connector-delete slot-status topics consume-claims flink-init sql-check sql sink \
+        alerts-clear alerts-count live cdc-reset live score
+
+
+
+flink-init:
+	cat $(FLINK_SQL)/01_sources.sql $(FLINK_SQL)/02_fraud_rules.sql > $(FLINK_SQL)/_init.sql
+
+sql: flink-init
+	docker exec -it insurance-flink-jobmanager \
+		./bin/sql-client.sh -i /opt/sql/_init.sql
+
+sink: flink-init
+	docker exec -it insurance-flink-jobmanager \
+		./bin/sql-client.sh -i /opt/sql/_init.sql -f /opt/sql/03_sink.sql
 
 core:
 	$(COMPOSE) --profile core up -d
@@ -72,3 +87,11 @@ cdc-reset:
 sql-check:
 	docker exec -it insurance-flink-jobmanager \
 		./bin/sql-client.sh -f /opt/sql/01_sources.sql
+
+alerts-clear:
+	$(PSQL) -c "TRUNCATE detection.fraud_alerts;"
+
+alerts-count:
+	$(PSQL) -c "SELECT rule_name, count(*) FROM detection.fraud_alerts GROUP BY rule_name ORDER BY 2 DESC;"
+score:
+	$(PSQL) < evaluation/sql/scoring.sql
